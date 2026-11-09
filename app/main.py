@@ -4,6 +4,8 @@ from fastapi import FastAPI, HTTPException, status, Depends, Request, Header
 from app.config import settings
 from app.logging_config import setup_logging
 from pydantic import BaseModel, Field
+import os, time, uuid, logging
+from app.logging_config import setup_logging, request_id_var
 setup_logging()
 log = logging.getLogger("task-tracker")
 
@@ -74,3 +76,21 @@ def update_task(task_id: int, body: TaskUpdate):
 
     tasks[task_id] = tasks[task_id].model_copy(update=changes)
     return tasks[task_id]
+
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    trace_header = request.headers.get("x-cloud-trace-context")
+    request_id = trace_header.split("/")[0] if trace_header else uuid.uuid4().hex
+    token = request_id_var.set(request_id)
+
+    start = time.perf_counter()
+    try:
+        response = await call_next(request)
+        response.headers["X-Request-ID"] = request_id
+        log.info("request", extra={"extra_fields": {
+            "method": request.method, "path": request.url.path,
+            "status": response.status_code,
+            "latency_ms": round((time.perf_counter() - start) * 1000, 1)}})
+        return response
+    finally:
+        request_id_var.reset(token)
